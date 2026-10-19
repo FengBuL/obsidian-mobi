@@ -1,0 +1,22 @@
+{
+  "name": "obsidian-mobi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mobi Obsidian plugin",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:release": "MOBI_OBSIDIAN_RELEASE=1 node scripts/build.mjs",
+    "type-check": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "esbuild": "^0.25.12",
+    "eslint": "^9.22.0",
+    "eslint-plugin-obsidianmd": "^0.4.2",
+    "obsidian": "^1.14.4",
+    "typescript": "~5.9.3"
+  }
+}
