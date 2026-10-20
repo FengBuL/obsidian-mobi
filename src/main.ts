@@ -1,25 +1,29 @@
 import type { Listening } from './offline'
+import type { LoadedPack } from './offline-pack'
 import type { MobiSettings } from './settings'
 import type { AppSource } from './source'
-import type { StaticFiles } from './static-server'
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { FileSystemAdapter, Notice, Platform, Plugin, TFile } from 'obsidian'
-import { readOfflineVersion, unpackOfflineArchive } from './offline-archive'
+import { normalizePath, Notice, Platform, Plugin, requestUrl, TFile } from 'obsidian'
 import { startOfflineServer } from './offline'
+import { loadOfflinePack, OFFLINE_PACK_FILE, offlinePackUrl } from './offline-pack'
+import { EXPECTED_OFFLINE_PACK } from './offline-pack-info'
 import { leafNotePath, pickRibbonAction } from './ribbon'
 import { DEFAULT_SETTINGS, normalizeSettings } from './settings'
 import { MobiSettingTab } from './settings-tab'
 import { resolveAppSource, resolveOfflineSource } from './source'
 import { createStaticServer } from './static-server'
 import { MobiView, VIEW_TYPE } from './view'
-import OFFLINE_BUNDLE from 'virtual:offline-bundle'
+
+export type OfflinePackStatus
+  = | { state: `unavailable` }
+    | { state: `missing`, sizeMb: number }
+    | { state: `ready`, sizeMb: number }
 
 export default class MobiPlugin extends Plugin {
   settings: MobiSettings = { ...DEFAULT_SETTINGS }
-  private offline: (Listening & { rootLabel: string }) | null = null
-  private offlineStarting: Promise<Listening & { rootLabel: string }> | null = null
-  private embeddedFiles: Map<string, Uint8Array> | null | undefined
+  private offline: Listening | null = null
+  private offlineStarting: Promise<Listening> | null = null
+  private packLoading: Promise<LoadedPack> | null = null
+  private pack: LoadedPack | null = null
 
   async onload() {
     this.settings = normalizeSettings(await this.loadData())
@@ -63,66 +67,55 @@ export default class MobiPlugin extends Plugin {
     return resolveAppSource(this.settings, this.manifest.version)
   }
 
-  /** 开发用：磁盘上的 mobi-app 目录（完整插件包或本地 build:offline） */
-  offlineDiskRoot(): string | null {
+  /** 离线包在插件目录里的位置（通过 Obsidian 的 vault 接口读写，不直接碰文件系统） */
+  private packPath(): string {
+    return normalizePath(`${this.manifest.dir ?? ``}/${OFFLINE_PACK_FILE}`)
+  }
+
+  async offlinePackStatus(): Promise<OfflinePackStatus> {
+    if (!EXPECTED_OFFLINE_PACK.sha256)
+      return { state: `unavailable` }
+    const sizeMb = Math.round(EXPECTED_OFFLINE_PACK.size / 1024 / 1024 * 10) / 10
+    if (this.pack)
+      return { state: `ready`, sizeMb }
     const adapter = this.app.vault.adapter
-    if (!(adapter instanceof FileSystemAdapter))
-      return null
-    return join(adapter.getBasePath(), this.manifest.dir ?? ``, `mobi-app`)
+    const path = this.packPath()
+    if (await adapter.exists(path) && (await adapter.stat(path))?.size === EXPECTED_OFFLINE_PACK.size)
+      return { state: `ready`, sizeMb }
+    return { state: `missing`, sizeMb }
   }
 
-  /** 兼容旧设置页文案 */
-  offlineRoot(): string | null {
-    return this.offlineDiskRoot()
+  /** 已加载的离线包的版本信息；还没加载过返回 null */
+  offlineVersionInfo() {
+    return this.pack?.info ?? null
   }
 
-  getEmbeddedOfflineFiles(): Map<string, Uint8Array> | null {
-    if (this.embeddedFiles !== undefined)
-      return this.embeddedFiles
-    if (!(OFFLINE_BUNDLE instanceof Uint8Array) || OFFLINE_BUNDLE.byteLength === 0) {
-      this.embeddedFiles = null
-      return null
+  /** 读本地离线包；没有或校验不过就从本插件的 GitHub Release 下载并核对 SHA-256。并发调用共用同一次加载 */
+  loadOfflinePack(): Promise<LoadedPack> {
+    if (this.pack)
+      return Promise.resolve(this.pack)
+    let loading = this.packLoading
+    if (!loading) {
+      loading = loadOfflinePack({
+        storage: this.app.vault.adapter,
+        path: this.packPath(),
+        expected: EXPECTED_OFFLINE_PACK,
+        download: async () => {
+          void new Notice(`正在从 GitHub 下载墨笔离线包（约 ${Math.round(EXPECTED_OFFLINE_PACK.size / 1024 / 1024)} MB），完成后自动打开`, 8000)
+          const response = await requestUrl({ url: offlinePackUrl(this.manifest.version), throw: true })
+          return response.arrayBuffer
+        },
+      }).then((pack) => {
+        this.pack = pack
+        return pack
+      }).finally(() => { this.packLoading = null })
+      this.packLoading = loading
     }
-    try {
-      this.embeddedFiles = unpackOfflineArchive(OFFLINE_BUNDLE)
-    }
-    catch {
-      this.embeddedFiles = null
-    }
-    return this.embeddedFiles
-  }
-
-  offlineVersionInfo(): { appVersion?: string, builtAt?: string, telemetry?: boolean, source: `disk` | `embedded` | `missing` } {
-    const disk = this.offlineDiskRoot()
-    if (disk && existsSync(join(disk, `index.html`))) {
-      try {
-        const info = JSON.parse(readFileSync(join(disk, `VERSION.json`), `utf8`)) as { appVersion?: string, builtAt?: string, telemetry?: boolean }
-        return { ...info, source: `disk` }
-      }
-      catch {
-        return { source: `disk` }
-      }
-    }
-    const embedded = this.getEmbeddedOfflineFiles()
-    if (embedded) {
-      const info = readOfflineVersion(embedded) ?? {}
-      return { ...info, source: `embedded` }
-    }
-    return { source: `missing` }
-  }
-
-  resolveOfflineFiles(): StaticFiles {
-    const disk = this.offlineDiskRoot()
-    if (disk && existsSync(join(disk, `index.html`)))
-      return { kind: `disk`, root: disk }
-    const embedded = this.getEmbeddedOfflineFiles()
-    if (embedded?.has(`index.html`))
-      return { kind: `memory`, files: embedded }
-    throw new Error(`没有可用的离线墨笔（目录安装应使用内嵌包；开发时可运行 pnpm --filter @mobi/obsidian build:offline）`)
+    return loading
   }
 
   /** 懒启动：第一个离线标签页打开时才起服务；并发调用共用同一次启动 */
-  ensureOfflineServer(): Promise<Listening & { rootLabel: string }> {
+  ensureOfflineServer(): Promise<Listening> {
     if (!Platform.isDesktop)
       return Promise.reject(new Error(`墨笔离线版只在桌面端可用`))
     if (this.offline)
@@ -130,12 +123,11 @@ export default class MobiPlugin extends Plugin {
     let starting = this.offlineStarting
     if (!starting) {
       starting = (async () => {
-        const files = this.resolveOfflineFiles()
-        const rootLabel = files.kind === `disk` ? files.root : `embedded`
+        const pack = await this.loadOfflinePack()
         const started = await startOfflineServer({
           saved: this.settings.offlinePort,
           random: Math.random,
-          listen: port => createStaticServer({ files, port }),
+          listen: port => createStaticServer({ files: pack.files, port }),
           save: async (port) => {
             this.settings = normalizeSettings({ ...this.settings, offlinePort: port })
             await this.saveData(this.settings)
@@ -143,7 +135,7 @@ export default class MobiPlugin extends Plugin {
         })
         if (started.notice)
           void new Notice(started.notice, 15000)
-        this.offline = { port: started.port, close: started.close, rootLabel }
+        this.offline = { port: started.port, close: started.close }
         return this.offline
       })().finally(() => { this.offlineStarting = null })
       this.offlineStarting = starting

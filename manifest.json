@@ -1,7 +1,7 @@
 {
   "id": "mobi",
   "name": "Mobi Editor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.7.2",
   "description": "Open Mobi to format notes and copy them into WeChat Official Accounts.",
   "author": "Shovy",

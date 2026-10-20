@@ -1,13 +1,19 @@
-import { gunzipSync } from 'node:zlib'
+import { brotliDecompressSync } from 'node:zlib'
 
-const MAGIC = Buffer.from(`MOBIOL1\n`)
+const MAGIC = Buffer.from(`MOBIOL2\n`)
 
-/** 把构建期打进 main.js 的离线归档解成 path → 内容 */
+export interface OfflineVersionInfo {
+  appVersion?: string
+  builtAt?: string
+  telemetry?: boolean
+}
+
+/** 把离线包（MAGIC + brotli 归档）解成 path → 内容 */
 export function unpackOfflineArchive(archive: Uint8Array): Map<string, Uint8Array> {
-  const buf = Buffer.from(archive)
+  const buf = Buffer.from(archive.buffer, archive.byteOffset, archive.byteLength)
   if (buf.length < MAGIC.length || !buf.subarray(0, MAGIC.length).equals(MAGIC))
     throw new Error(`离线包格式无效`)
-  const body = gunzipSync(buf.subarray(MAGIC.length))
+  const body = brotliDecompressSync(buf.subarray(MAGIC.length))
   const files = new Map<string, Uint8Array>()
   let offset = 0
   while (offset < body.length) {
@@ -28,12 +34,12 @@ export function unpackOfflineArchive(archive: Uint8Array): Map<string, Uint8Arra
   return files
 }
 
-export function readOfflineVersion(files: Map<string, Uint8Array>): { appVersion?: string, builtAt?: string, telemetry?: boolean } | null {
+export function readOfflineVersion(files: Map<string, Uint8Array>): OfflineVersionInfo | null {
   const raw = files.get(`VERSION.json`)
   if (!raw)
     return null
   try {
-    return JSON.parse(Buffer.from(raw).toString(`utf8`)) as { appVersion?: string, builtAt?: string, telemetry?: boolean }
+    return JSON.parse(Buffer.from(raw).toString(`utf8`)) as OfflineVersionInfo
   }
   catch {
     return null
